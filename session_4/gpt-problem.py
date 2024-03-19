@@ -15,8 +15,8 @@ from torch.nn import functional as F
 
 batch_size = 2 # how many independent sequences will we process in parallel?
 block_size = 2 # what is the maximum context length for predictions?
-max_iters = 2
-eval_interval = 2
+max_iters = 10 # how many training steps to run in total
+eval_interval = 2 # how often to evaluate the model on the validation set
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
@@ -74,10 +74,10 @@ class Head(nn.Module):
 
     def __init__(self, head_size):
         super().__init__()
-        self.key = nn.Linear(n_embd, head_size, bias=False) # produit matriciel lineaire simple
-        self.query = nn.Linear(n_embd, head_size, bias=False) 
-        self.values = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # store a persistent buffer for the forward pass
+        self.key = nn.Linear(n_embd, head_size, bias=False).to(device) # produit matriciel lineaire simple
+        self.query = nn.Linear(n_embd, head_size, bias=False).to(device) 
+        self.values = nn.Linear(n_embd, head_size, bias=False).to(device)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)).to(device)) # store a persistent buffer for the forward pass
 
     def forward (self, x):
         B, T, C = x.shape
@@ -86,7 +86,7 @@ class Head(nn.Module):
         V = self.values(x)
         
         wei = (Q @ K.transpose(-2,-1))*C**-0.5 # pour pas transposer sur le batch, (transpose(1,2) et pas prendre en compte le batch)
-        wei = wei.masked_fill(self.tril[:T,:T] == 0, float('-inf'))
+        wei = wei.masked_fill(self.tril[:T,:T] == 0, float('-inf')).to(device)
         wei = F.softmax(wei, dim=-1)
         out = wei @ V
         return out    
@@ -95,7 +95,7 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for i in range(num_heads)]) # on compute chaque head pour le nombre  voulue de head
-        self.lm = nn.Linear(n_embd, n_embd) # prend en entrée une matrice dont la dim est n_emb
+        self.lm = nn.Linear(num_heads*head_size, n_embd, device=device) # prend en entrée une matrice dont la dim est n_emb
 
 
     def forward (self, x):
@@ -107,8 +107,8 @@ class FeedForward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
     def __init__(self, n_embd):
         super().__init__()
-        self.linear1 = nn.Linear(n_embd, 4*n_embd)
-        self.linear2 = nn.Linear(4*n_embd, n_embd)
+        self.linear1 = nn.Linear(n_embd, 4*n_embd, device=device)
+        self.linear2 = nn.Linear(4*n_embd, n_embd, device=device)
         self.activation = nn.ReLU()
 
     def forward(self, x):
@@ -122,22 +122,15 @@ class Block(nn.Module):
     def __init__(self, n_embd, n_head):
         super().__init__()
         head_size = n_embd // n_head
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.ln2 = nn.LayerNorm(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd, device=device)
+        self.ln2 = nn.LayerNorm(n_embd, device=device)
         self.mha = MultiHeadAttention(n_head, head_size)
         self.ff = FeedForward(n_embd)        
 
     def forward(self, x):
-        out = self.ln1(x)
+        temp_attention = self.mha(self.ln1(x)) + x
 
-        out = self.mha(out)
-        temp_attention = out + x
-
-        out = self.ln2(temp_attention)
-
-        out = self.ff(out)
-        out = out + temp_attention
-        
+        out = self.ff(self.ln2(temp_attention)) + temp_attention      
         return out
 
 class GPT(nn.Module):
@@ -149,9 +142,9 @@ class GPT(nn.Module):
         # Transformers do not understand the order of tokens in a sequence. To provide positional information, positional encodings are added to the token embeddings,whith each position in the input sequence is mapped to its corresponding dense vector representation : 
         self.pos_embedding_table = nn.Embedding(block_size, n_embd) 
         
-        self.blocks = [Block(n_embd, n_heads) for i in range(n_layer)] #  GPT models consist of a combinaison of identical transformer blocks. Each block contains a self-attention mechanism followed by feedforward neural networks.
-        self.ln = nn.LayerNorm(n_embd) # normalize the activations of each layer in a neural network
-        self.linear = nn.Linear(n_embd, vocab_size) # (proba). maps the output of the last transformer block to the vocabulary size, allowing the model to generate probabilities for each token in the vocabulary, which are then used to generate or predict the next token in the sequence
+        self.blocks = nn.Sequential(*[Block(n_embd, n_heads) for _ in range(n_layer)]) #  GPT models consist of a combinaison of identical transformer blocks. Each block contains a self-attention mechanism followed by feedforward neural networks.
+        self.ln = nn.LayerNorm(n_embd, device=device) # normalize the activations of each layer in a neural network
+        self.linear = nn.Linear(n_embd, vocab_size, device=device) # (proba). maps the output of the last transformer block to the vocabulary size, allowing the model to generate probabilities for each token in the vocabulary, which are then used to generate or predict the next token in the sequence
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
@@ -161,8 +154,7 @@ class GPT(nn.Module):
         x = token_emb + pos_emb # sum the token embeddings and position embeddings
         
         # apply blocks, layer norm and linear layer (leading to the logits variable)
-        for block in self.blocks:
-            x = block(x) # the output of one block serve as the input to the next. This process allows the model to gradually refine its understanding of the input sequence by applying multiple layers of transformation.
+        x = self.blocks(x) # the output of one block serve as the input to the next. This process allows the model to gradually refine its understanding of the input sequence by applying multiple layers of transformation.
         
         out = self.ln(x)
         logits = self.linear(out)
