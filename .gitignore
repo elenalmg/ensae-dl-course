@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# data
+**/session_5/files/
+
+
 # Distribution / packaging
 .Python
 build/
